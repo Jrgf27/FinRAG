@@ -1,15 +1,22 @@
 """Eval runner with ablations.
 
-Runs the labelled gold set through the pipeline under several configurations and
-prints a comparison table. The ablations are the point: they quantify what each
-retrieval stage contributes, turning "I built a fancy pipeline" into "reranking
-lifted nDCG@6 from X to Y".
+Runs the labelled gold set through several retrieval configurations and prints a
+comparison table. The ablations isolate what each stage contributes, turning
+"I built a pipeline" into "reranking lifted nDCG@6 from X to Y".
 
 Configs compared:
-  dense_only        : semantic search alone (the naive baseline)
-  hybrid            : dense + BM25 + RRF
-  hybrid_rerank     : + cross-encoder reranking
-  full              : + query rewriting   (the shipped system)
+  dense_only     : semantic vector search alone (the naive baseline)
+  hybrid         : dense + BM25 fused with Reciprocal Rank Fusion
+  hybrid_rerank  : + cross-encoder reranking of the fused pool
+  full           : + query rewriting (the shipped system)
+
+Measurement principle: each config retrieves a CANDIDATE POOL of the same size
+(`pool`, default 20), and metrics are computed at k over that pool's top-k. This
+keeps the comparison fair — every stage is judged on the same-sized output, so a
+later stage that *reorders* the pool (rerank) is credited for moving relevant
+chunks up, not penalised by an arbitrary early truncation.
+
+No global state is mutated between rows: rewriting is passed explicitly.
 
 Run:  python eval/run_eval.py --gold eval/gold.jsonl
 """
@@ -22,7 +29,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from finrag.config import settings
 from finrag.pipeline import ingest
 from finrag.retriever import HybridRetriever
 from finrag.vectorstore import VectorStore
@@ -32,25 +38,49 @@ from metrics import aggregate, mrr, ndcg_at_k, recall_at_k
 app = typer.Typer()
 console = Console()
 
-# (label, settings-overrides) — applied before building the retriever.
-ABLATIONS = {
-    "dense_only":    {"use_query_rewriting": False, "_mode": "dense"},
-    "hybrid":        {"use_query_rewriting": False, "_mode": "hybrid"},
-    "hybrid_rerank": {"use_query_rewriting": False, "_mode": "rerank"},
-    "full":          {"use_query_rewriting": True,  "_mode": "rerank"},
-}
 
+def retrieve(retriever: HybridRetriever, query: str, mode: str, pool: int) -> list[str]:
+    """Return ranked chunk_ids for a config, all cut to the same pool size.
 
-def _retrieve_for_mode(retriever: HybridRetriever, query: str, mode: str) -> list[str]:
-    """Return retrieved chunk_ids for a given ablation mode."""
+    mode:
+      dense   -> dense candidates only
+      hybrid  -> dense + sparse, fused with RRF
+      rerank  -> fused pool rescored by the cross-encoder
+      full    -> rerank, but with query rewriting expanding the query set first
+    """
     if mode == "dense":
-        scored = retriever._dense(query)[: settings.rerank_top_k]
+        scored = retriever._dense(query)[:pool]
+
     elif mode == "hybrid":
-        lists = [retriever._dense(query), retriever._sparse(query)]
-        scored = retriever._rrf(lists)[: settings.rerank_top_k]
-    else:  # rerank (optionally with rewriting handled by full retrieve)
-        scored = retriever.retrieve(query)
+        fused = retriever._rrf([retriever._dense(query), retriever._sparse(query)])
+        scored = fused[:pool]
+
+    elif mode in ("rerank", "full"):
+        queries = [query]
+        if mode == "full":
+            # rewriting expands the query set; rerank still scores vs the original
+            queries = retriever.rewrite(query)
+        ranked_lists = []
+        for q in queries:
+            ranked_lists.append(retriever._dense(q))
+            ranked_lists.append(retriever._sparse(q))
+        fused = retriever._rrf(ranked_lists)
+        # rerank the fused shortlist, then keep `pool` (reranker may return fewer)
+        reranked = retriever._rerank(query, fused[:pool])
+        scored = reranked[:pool]
+
+    else:
+        raise ValueError(mode)
+
     return [s.chunk.chunk_id for s in scored]
+
+
+CONFIGS = {
+    "dense_only": "dense",
+    "hybrid": "hybrid",
+    "hybrid_rerank": "rerank",
+    "full": "full",
+}
 
 
 @app.command()
@@ -58,6 +88,7 @@ def main(
     corpus: Path = typer.Option(Path("data/processed/corpus.jsonl")),
     gold: Path = typer.Option(Path("eval/gold.jsonl")),
     k: int = typer.Option(6),
+    pool: int = typer.Option(20, help="Candidate pool size each config retrieves"),
 ) -> None:
     records = [json.loads(ln) for ln in corpus.read_text().splitlines() if ln.strip()]
     chunks = ingest(records)
@@ -67,19 +98,17 @@ def main(
 
     gold_rows = [json.loads(ln) for ln in gold.read_text().splitlines() if ln.strip()]
 
-    table = Table(title=f"Retrieval ablation (n={len(gold_rows)} questions, k={k})")
+    table = Table(title=f"Retrieval ablation (n={len(gold_rows)} questions, k={k}, pool={pool})")
     table.add_column("config")
     table.add_column(f"recall@{k}", justify="right")
     table.add_column("MRR", justify="right")
     table.add_column(f"nDCG@{k}", justify="right")
 
-    for label, overrides in ABLATIONS.items():
-        settings.use_query_rewriting = overrides["use_query_rewriting"]
-        mode = overrides["_mode"]
+    for label, mode in CONFIGS.items():
         per_q = []
         for row in gold_rows:
             relevant = set(row["relevant_chunk_ids"])
-            retrieved = _retrieve_for_mode(retriever, row["question"], mode)
+            retrieved = retrieve(retriever, row["question"], mode, pool)
             per_q.append(
                 {
                     "recall": recall_at_k(retrieved, relevant, k),
@@ -96,8 +125,9 @@ def main(
 
     console.print(table)
     console.print(
-        "\n[dim]Baseline = dense_only. Read each row against it to see the "
-        "marginal contribution of fusion, reranking and query rewriting.[/dim]"
+        "\n[dim]Baseline = dense_only. Each config retrieves the same-sized pool, "
+        "so reordering stages are judged fairly. Metrics computed at k over each "
+        "config's top-k.[/dim]"
     )
 
 

@@ -96,7 +96,7 @@ class HybridRetriever:
         return fused
 
     # ---- stage 5: cross-encoder rerank --------------------------------------
-    def _rerank(self, query: str, candidates: list[ScoredChunk]) -> list[ScoredChunk]:
+    def _rerank(self, query: str, candidates: list[ScoredChunk], top_k: int | None = None) -> list[ScoredChunk]:
         if not candidates:
             return []
         if self._reranker is None:
@@ -110,7 +110,8 @@ class HybridRetriever:
             for c, s in zip(candidates, scores)
         ]
         reranked.sort(key=lambda s: s.score, reverse=True)
-        return reranked[: settings.rerank_top_k]
+        cut = settings.rerank_top_k if top_k is None else top_k
+        return reranked[:cut]
 
     # ---- public API ----------------------------------------------------------
     def retrieve(self, query: str) -> list[ScoredChunk]:
@@ -118,7 +119,9 @@ class HybridRetriever:
         ranked_lists: list[list[ScoredChunk]] = []
         for q in queries:
             ranked_lists.append(self._dense(q))
-            ranked_lists.append(self._sparse(q))
+            # Sparse fusion is opt-in; on this corpus it did not help (RESULTS.md).
+            if settings.use_hybrid:
+                ranked_lists.append(self._sparse(q))
         fused = self._rrf(ranked_lists)
         # Rerank against the ORIGINAL question, not the rewrites, so the final
         # ordering reflects what the user actually asked.

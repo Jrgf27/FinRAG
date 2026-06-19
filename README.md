@@ -76,24 +76,37 @@ Every box is independently toggleable so the eval harness can ablate it.
 ## Quickstart
 
 ```bash
-pip install -e ".[dev,api]"
+pip install -e ".[dev]"
 
-# set keys (the only external requirements)
-export ANTHROPIC_API_KEY=...
-export OPENAI_API_KEY=...          # embeddings only; swappable in embeddings.py
+# Embeddings run locally (sentence-transformers) — no embedding API key needed.
+# Generation, query rewriting and the eval judge use Anthropic:
+cp .env.example .env        # then add your key
+# .env: ANTHROPIC_API_KEY=...
 
-# ask a question against the bundled sample corpus
-finrag ask "What was Acme's Q3 FY2025 revenue and how fast did cloud grow?"
+# ingest a real filing from SEC EDGAR (HTML, no PDF conversion)
+python scripts/ingest_edgar.py \
+  "https://www.sec.gov/Archives/edgar/data/789019/000119312525256321/msft-20250930.htm" \
+  --company "Microsoft" --period "FY2026 Q1"
+
+# add a second issuer to the same corpus
+python scripts/ingest_edgar.py "<second filing .htm url>" \
+  --company "Apple" --period "FY2026 Q1" --append
 
 # see what the retriever returns, without generation
-finrag inspect "Globex buyback and net cash position"
+finrag inspect "what drove growth in Microsoft cloud revenue"
 
-# run the evaluation with ablations
+# ask a grounded, cited question
+finrag ask "How did Microsoft's cloud revenue grow this quarter?"
+
+# build a gold set (independent-judge labelling) and run the eval
+python scripts/auto_gold.py --num-questions 40
 python eval/run_eval.py --gold eval/gold.jsonl
 ```
 
-The vector store defaults to Qdrant's in-memory mode, so the repo runs end to end
-with no external services. Point `FINRAG_QDRANT_URL` at a server to persist.
+Embeddings are local by default, so the only external dependency is the Anthropic
+API. The vector store defaults to Qdrant's in-memory mode — the repo runs end to
+end with no other services. Point `FINRAG_QDRANT_URL` at a server to persist, and
+install the optional `[openai]` extra if you prefer cloud embeddings.
 
 ---
 
