@@ -24,7 +24,7 @@ def _point_id(chunk_id: str) -> str:
 
 
 class VectorStore:
-    def __init__(self, dim: int = 3072) -> None:
+    def __init__(self, dim: int = 384) -> None:
         # ":memory:" keeps the demo dependency-free; a URL persists.
         if settings.qdrant_url and settings.qdrant_url.startswith("http"):
             self.client = QdrantClient(url=settings.qdrant_url)

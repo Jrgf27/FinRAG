@@ -1,23 +1,27 @@
 """Embedding provider.
 
-Isolated behind one function so the rest of the system never imports an SDK
-directly — swap OpenAI for a local model or Voyage by editing this file alone.
+Local sentence-transformers model by default: no API key, no external calls,
+which suits on-prem / data-sensitive deployments. Swap for OpenAI or Voyage by
+editing this file alone — the rest of the system never imports an SDK directly.
 """
 from __future__ import annotations
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+from functools import lru_cache
 
 from .config import settings
 
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(min=1, max=20))
+@lru_cache(maxsize=1)
+def _model():
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(settings.embedding_model)
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Return one embedding vector per input text. Batched for throughput."""
-    from openai import OpenAI
-
-    client = OpenAI()
-    resp = client.embeddings.create(model=settings.embedding_model, input=texts)
-    return [d.embedding for d in resp.data]
+    vectors = _model().encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+    return [v.tolist() for v in vectors]
 
 
 def embed_query(text: str) -> list[float]:

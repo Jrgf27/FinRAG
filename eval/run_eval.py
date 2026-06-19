@@ -66,7 +66,7 @@ def retrieve(retriever: HybridRetriever, query: str, mode: str, pool: int) -> li
             ranked_lists.append(retriever._sparse(q))
         fused = retriever._rrf(ranked_lists)
         # rerank the fused shortlist, then keep `pool` (reranker may return fewer)
-        reranked = retriever._rerank(query, fused[:pool])
+        reranked = retriever._rerank(query, fused[:pool], top_k=pool)
         scored = reranked[:pool]
 
     else:
